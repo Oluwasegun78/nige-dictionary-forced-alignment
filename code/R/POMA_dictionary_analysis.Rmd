@@ -1,5 +1,5 @@
 ---
-title: "Which dictionary? Reproducible analysis of pronunciation-dictionary effects on forced-aligned Nigerian English vowels"
+title: "Acoustic model choice as a source of measurement bias in Nigerian English vowel analysis"
 author: "Oluwasegun Amoniyan"
 date: "`r format(Sys.Date(), '%Y-%m-%d')`"
 output:
