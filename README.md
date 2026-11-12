@@ -1,7 +1,7 @@
-# Which dictionary? Pronunciation dictionaries and forced-aligned Nigerian English vowels
+# Acoustic model choice as a source of measurement bias in Nigerian English vowel analysis
 
 Code, settings, annotation files and derived results for the paper
-*Which dictionary? Pronunciation dictionaries as a source of measurement bias in forced-aligned Nigerian English vowels* (POMA-D-26-00139R2).
+*Acoustic model choice as a source of measurement bias in Nigerian English vowel analysis*
 
 Four pronunciation dictionaries (NigE, Indian English, UK English, US English) were used with one MFA acoustic model (english_mfa, MFA 3.3.8)
 to align the same Nigerian English recordings; formants were extracted with new-fave 1.2.1. A listener marked 308 vowels blind to the alignments.
