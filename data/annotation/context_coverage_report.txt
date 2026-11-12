@@ -1,0 +1,46 @@
+Preceding context x following context, all 396 tokens
+            liquid/glide         nasal         pause voiced obstru voiceless obs         vowel
+coronal               16            30            12            18            26            21
+dorsal                14            12             8            17            13            11
+glottal                5             5             1             2             4             2
+labial                30            17             7            17            39             6
+pause                  3             8             2             6             7             1
+vowel                  5             6             2             8            11             4
+
+Per vowel label (non-NURSE): n, distinct preceding classes, distinct following classes
+  a    n= 30
+       preceding: coronal 8, dorsal 7, vowel 6, glottal 3, labial 3, pause 3
+       following: liquid/glide 7, voiceless obstruent 6, nasal 5, voiced obstruent 4, pause 4, vowel 4
+  aː   n= 30
+       preceding: coronal 12, labial 11, glottal 3, pause 2, vowel 1, dorsal 1
+       following: voiceless obstruent 11, voiced obstruent 8, nasal 6, pause 3, liquid/glide 2
+  e    n= 30
+       preceding: labial 9, coronal 8, dorsal 7, vowel 3, pause 3
+       following: voiceless obstruent 7, nasal 7, voiced obstruent 6, liquid/glide 5, pause 3, vowel 2
+  i    n= 30
+       preceding: coronal 10, labial 7, dorsal 6, vowel 4, pause 3
+       following: nasal 7, voiceless obstruent 6, voiced obstruent 6, pause 5, liquid/glide 3, vowel 3
+  iː   n= 30
+       preceding: coronal 10, labial 9, dorsal 6, vowel 3, pause 2
+       following: voiced obstruent 8, voiceless obstruent 6, liquid/glide 6, pause 4, nasal 3, vowel 3
+  o    n= 30
+       preceding: coronal 9, dorsal 6, vowel 5, glottal 4, labial 4, pause 2
+       following: nasal 8, voiceless obstruent 6, voiced obstruent 6, liquid/glide 6, pause 2, vowel 2
+  u    n= 30
+       preceding: coronal 11, dorsal 8, labial 8, vowel 3
+       following: voiceless obstruent 10, vowel 7, nasal 5, liquid/glide 4, voiced obstruent 3, pause 1
+  uː   n= 30
+       preceding: dorsal 13, coronal 7, labial 6, glottal 4
+       following: nasal 6, vowel 5, voiceless obstruent 5, voiced obstruent 5, liquid/glide 5, pause 4
+  ɔ    n= 30
+       preceding: pause 8, labial 7, coronal 5, vowel 4, dorsal 4, glottal 2
+       following: nasal 10, voiceless obstruent 7, voiced obstruent 5, pause 5, liquid/glide 2, vowel 1
+  ɛ    n= 30
+       preceding: coronal 8, dorsal 6, labial 5, pause 4, vowel 4, glottal 3
+       following: nasal 10, liquid/glide 6, voiced obstruent 6, voiceless obstruent 5, vowel 2, pause 1
+  ɛː   n= 29
+       preceding: labial 14, coronal 13, dorsal 2
+       following: liquid/glide 13, vowel 8, voiceless obstruent 4, voiced obstruent 3, nasal 1
+  ʊ    n= 30
+       preceding: coronal 12, dorsal 9, labial 6, vowel 3
+       following: liquid/glide 10, vowel 8, voiceless obstruent 6, voiced obstruent 5, nasal 1

@@ -1,0 +1,5 @@
+cdf66a8a6bbd4e8d3080a667ab304c4de6399ee3  /Users/oamoniyan/Documents/MFA/pretrained_models/acoustic/english_mfa.zip
+c55b074de0ed1995abcead7397feecfb4856dc05  /Users/oamoniyan/Documents/MFA/pretrained_models/dictionary/english_nigeria_mfa.dict
+15c17afd714e2b3998f3124073cd28f61c456c86  /Users/oamoniyan/Documents/MFA/pretrained_models/dictionary/english_india_mfa.dict
+deb99a8f434ea20986908c6a6d28eb4f3cfe3ec8  /Users/oamoniyan/Documents/MFA/pretrained_models/dictionary/english_uk_mfa.dict
+86df803c14f7b7a2246e8ee92b2d85b23fd3f79a  /Users/oamoniyan/Documents/MFA/pretrained_models/dictionary/english_us_mfa.dict

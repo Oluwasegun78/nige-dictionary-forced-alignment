@@ -1,0 +1,10 @@
+.DS_Store
+.Rproj.user/
+.Rhistory
+*.wav
+*.mp3
+*.TextGrid
+*_tracks.csv
+*_param.csv
+*_logparam.csv
+*.zip

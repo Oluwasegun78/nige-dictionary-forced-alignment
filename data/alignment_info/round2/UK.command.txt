@@ -1,0 +1,1 @@
+/opt/miniconda3/envs/aligner/bin/mfa align --clean /Users/oamoniyan/mfa_work_ext/in/ext_UK /Users/oamoniyan/Documents/MFA/pretrained_models/dictionary/english_uk_mfa.dict /Users/oamoniyan/Documents/MFA/pretrained_models/acoustic/english_mfa.zip /Users/oamoniyan/mfa_work_ext/out/UK

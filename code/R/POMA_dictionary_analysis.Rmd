@@ -1,0 +1,1030 @@
+---
+title: "Which dictionary? Reproducible analysis of pronunciation-dictionary effects on forced-aligned Nigerian English vowels"
+author: "Oluwasegun Amoniyan"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+<!--
+HOW TO USE
+1. Edit only the `config` chunk (paths and settings).
+2. Knit. Chunks run with error = TRUE, so a failing chunk shows its error in the output and the document
+   continues; send me the first error you see. When everything runs, set error = FALSE in the `setup` chunk.
+3. The last section ("Verification") compares every headline number with the manuscript and, if the Python
+   scores exist, compares this document's token-by-token scores with them. Read it first.
+
+ONE CORPUS: the recordings were transcribed in two rounds (round1 = the first 100; round2 = 31 more, folder extension/) and went through the
+identical pipeline. Every analysis below pools both rounds; `part` is used only for checks and sensitivity tables.
+
+WHAT THIS DOCUMENT REPRODUCES (section = manuscript section)
+  1   Data and alignment output     Tables 1 and 2
+  2   Reference annotation          Section 2.3 (sample, status, numbering check, reliability)
+  3   Scoring against the dictionaries   Tables 3-6, Figures 2 and 3, duration, NURSE, glides
+  4   Formants                      Table 7, stability, Figures 4 and 5, label sorting, NURSE, trajectories
+  5   Reliability                   second annotator and self-repeat (runs when the files exist)
+  6   Verification
+
+NOT RE-RUN HERE (done once, with a fixed seed, and documented): the draw of the 396 tokens
+(draw_blind_sample_v2.py, seed 2027), the Praat annotation script, MFA alignment and new-fave extraction.
+This document reads their outputs.
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = TRUE,
+                      fig.width = 9, fig.height = 6, dpi = 150)
+```
+
+# 0. Setup and configuration
+
+```{r packages}
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(purrr); library(stringr)
+  library(readr); library(tibble); library(ggplot2); library(knitr)
+})
+# other packages can mask these verbs, so name them explicitly
+select <- dplyr::select; filter <- dplyr::filter; mutate <- dplyr::mutate
+summarise <- dplyr::summarise; rename <- dplyr::rename; count <- dplyr::count; slice <- dplyr::slice
+set.seed(20261111)
+```
+
+```{r config}
+cfg <- list(
+  base      = "/Users/oamoniyan/Library/CloudStorage/OneDrive-UniversityofPittsburgh/POMA_New_20261110",
+  ann_dir   = path.expand("~/annotation_work"),   # folder holding batch_*_annotated.tsv
+  conds     = c("NigE", "Indian", "UK", "US"),    # order used in every table and figure
+  match_rule = "overlap",   # "overlap" (main analysis) or "midpoint" (the stricter check reported in the supplement)
+  diph_as_vowel = TRUE,     # a diphthong label returned by an aligner counts as a vowel (a substitution)
+  B         = 2000,         # bootstrap resamples; recordings are resampled
+  tol_ms    = c(5, 10, 20), # boundary tolerances
+  min_dur   = 0.05,         # new-fave minimum vowel duration (s); used for the availability table only
+  min_span  = 0.02,         # tokens = every vowel new-fave tracked; only almost empty tracks are dropped
+  n_bins    = 20,           # equal-duration bins for trajectories
+  min_n_ellipse   = 40,     # labels with fewer tokens get no ellipse in Figure 4
+  min_n_traj      = 20,     # labels with fewer tokens are not summarised for trajectories
+  min_tokens_norm = 30,     # a recording needs this many tracked vowels to be normalised
+  cap_per_rec = 150,        # at most this many vowels per recording and dictionary in figures and label-level summaries (long recordings would otherwise dominate)
+  low_snr_db   = 3,
+  low_snr_file = "btal_15_4"
+)
+p <- function(...) file.path(cfg$base, ...)
+out_dir <- p("blind_sample_v2", "results_R"); dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+pal <- c(NigE = "#0072B2", Indian = "#CC79A7", UK = "#D55E00", US = "#009E73")
+checks <- list()      # filled in as the document runs; printed in section 6
+add_check <- function(label, got, want, tol = 0.1) {
+  checks[[length(checks) + 1]] <<- tibble(check = label, got = round(as.numeric(got), 3), expected = want,
+                                          ok = !is.na(got) & abs(as.numeric(got) - want) <= tol)
+}
+sd_pop <- function(x) sqrt(mean((x - mean(x))^2))     # population SD, as used for the manuscript values
+```
+
+```{r preflight}
+pre <- tibble(dictionary = cfg$conds,
+              textgrids = map_int(cfg$conds, ~ length(list.files(p(.x), "\\.TextGrid$"))),
+              wavs      = map_int(cfg$conds, ~ length(list.files(p(.x), "\\.wav$"))),
+              tracks    = map_int(cfg$conds, ~ length(list.files(p("fave_runs", .x), "tracks\\.csv$"))))
+kable(pre, caption = "Files found in each dictionary folder")
+stopifnot(all(pre$textgrids > 0))
+rec_sets <- setNames(map(cfg$conds, ~ tools::file_path_sans_ext(list.files(p(.x), "\\.TextGrid$"))), cfg$conds)
+# The corpus has two parts that went through the identical pipeline: the recordings transcribed first ("round1", this folder)
+# and those transcribed afterwards ("round2", folder extension/). All analyses pool both.
+part_root <- function(part) if (part == "round1") cfg$base else p("extension")
+rec_sets_study <- rec_sets
+ext_dir <- p("extension")
+rec_sets_ext <- setNames(map(cfg$conds, ~ if (dir.exists(file.path(ext_dir, .x))) tools::file_path_sans_ext(list.files(file.path(ext_dir, .x), "\\.TextGrid$")) else character(0)), cfg$conds)
+study_shared <- sort(Reduce(intersect, rec_sets_study))
+ext_shared   <- sort(Reduce(intersect, rec_sets_ext))
+corpus_map <- bind_rows(tibble(rec = study_shared, part = "round1"), tibble(rec = ext_shared, part = "round2"))
+stopifnot(!anyDuplicated(corpus_map$rec))
+shared  <- corpus_map$rec                         # the analysed corpus: recordings aligned by all four dictionaries
+part_of <- setNames(corpus_map$part, corpus_map$rec)
+for (r in setdiff(unlist(rec_sets_ext), names(part_of)))   part_of[r] <- "round2"
+for (r in setdiff(unlist(rec_sets_study), names(part_of))) part_of[r] <- "round1"
+cat("Recordings aligned by all four dictionaries:", length(shared), "(round 1:", length(study_shared), "+ round 2:", length(ext_shared), ")\n")
+add_check("Recordings aligned by all four dictionaries, round 1", length(study_shared), 69, 0)
+add_check("Recordings aligned by all four dictionaries, round 2", length(ext_shared), 19, 0)
+add_check("Recordings aligned by all four dictionaries, whole corpus", length(shared), 88, 0)
+for (cd in cfg$conds) add_check(paste("TextGrids,", cd, "round 1"), length(rec_sets_study[[cd]]), c(NigE = 70, Indian = 70, UK = 71, US = 70)[[cd]], 0)
+for (cd in cfg$conds) add_check(paste("TextGrids,", cd, "round 2"), length(rec_sets_ext[[cd]]), c(NigE = 26, Indian = 22, UK = 21, US = 20)[[cd]], 0)
+```
+
+## 0.1 TextGrid reader and label conventions
+
+The TextGrid reader is the one used in the earlier analysis (it handles Praat's UTF-16 files with a byte-order mark).
+
+```{r tg-functions}
+read_tg_lines <- function(path) {
+  raw <- readBin(path, what = "raw", n = file.info(path)$size)
+  if (length(raw) >= 2 && raw[1] == as.raw(0xFF) && raw[2] == as.raw(0xFE)) {
+    txt <- iconv(list(raw[-(1:2)]), from = "UTF-16LE", to = "UTF-8")
+  } else if (length(raw) >= 2 && raw[1] == as.raw(0xFE) && raw[2] == as.raw(0xFF)) {
+    txt <- iconv(list(raw[-(1:2)]), from = "UTF-16BE", to = "UTF-8")
+  } else {
+    if (length(raw) >= 3 && all(raw[1:3] == as.raw(c(0xEF, 0xBB, 0xBF)))) raw <- raw[-(1:3)]
+    txt <- rawToChar(raw)
+    Encoding(txt) <- "UTF-8"
+  }
+  if (is.na(txt)) stop("Could not decode TextGrid: ", path)
+  strsplit(txt, "\r\n|\n|\r")[[1]]
+}
+
+parse_textgrid <- function(path) {
+  L <- trimws(read_tg_lines(path))
+  starts <- grep("^item \\[[0-9]+\\]:", L)
+  if (length(starts) == 0) stop("Not a long-format TextGrid (save as 'full text'): ", path)
+  ends <- c(starts[-1] - 1, length(L))
+  purrr::map2_dfr(starts, ends, function(s, e) {
+    blk <- L[s:e]
+    cls <- sub('^class = "(.*)"$', "\\1", blk[grep("^class = ", blk)[1]])
+    nm  <- sub('^name = "(.*)"$',  "\\1", blk[grep("^name = ",  blk)[1]])
+    if (!identical(cls, "IntervalTier")) return(NULL)
+    ii <- grep("^intervals \\[[0-9]+\\]:", blk)
+    if (length(ii) == 0) return(NULL)
+    tibble(tier = nm,
+           xmin = as.numeric(sub("^xmin = ", "", blk[ii + 1])),
+           xmax = as.numeric(sub("^xmax = ", "", blk[ii + 2])),
+           text = gsub('""', '"', sub('^text = "(.*)"\\s*$', "\\1", blk[ii + 3])))
+  })
+}
+```
+
+```{r labels}
+ARPA <- c(AA = "ɑ", AE = "æ", AH = "ʌ", AO = "ɔ", AW = "aw", AY = "aj", EH = "ɛ", ER = "ɜ", EY = "ej",
+          IH = "ɪ", IY = "i", OW = "ow", OY = "ɔj", UH = "ʊ", UW = "u", AX = "ə")
+canon_label <- function(x) {
+  x <- str_trim(x)
+  base <- str_remove(x, "[0-2]$")
+  ifelse(!is.na(x) & str_detect(x, "^[A-Z]{2}[0-2]?$") & base %in% names(ARPA), unname(ARPA[base]), x)
+}
+vowel_re <- "^[aeiouyɑæɐɘəɚɛɜɝɞɨɪɔɵøɤɯʉʊʌʏœɶɒ]"
+DIPH    <- c("aj", "aw", "ɔj", "ej", "ow", "əw", "ɑj", "ɑw", "aɪ", "aʊ", "ɔɪ", "eɪ", "oʊ", "əʊ",
+             "ou", "ei", "ai", "au", "oi", "ɔi", "eə", "ɛə", "ɪə", "ʊə")
+FRONT   <- c("i", "iː", "ɪ", "ɪː", "e", "eː", "ɛ", "ɛː", "æ", "a", "aː")
+CENTRAL <- c("ɜ", "ɜː", "ə", "ʌ", "ɐ", "ɚ", "ɝ")
+BACK    <- c("u", "uː", "ʊ", "o", "oː", "ɔ", "ɔː", "ɑ", "ɒ")
+is_vowel <- function(x) str_detect(x, vowel_re) & (cfg$diph_as_vowel | !(x %in% DIPH))
+category <- function(x) case_when(x %in% DIPH ~ "Diphthong", x %in% FRONT ~ "Front", x %in% CENTRAL ~ "Central",
+                                  x %in% BACK ~ "Back", TRUE ~ "Other")
+nucleus  <- function(x) ifelse(x %in% DIPH, str_sub(x, 1, 1), x)   # first element of a diphthong
+
+tg_cache <- new.env()
+read_phones <- function(cond, rec) {
+  key <- paste(cond, rec, sep = "||")
+  if (!is.null(tg_cache[[key]])) return(tg_cache[[key]])
+  pt <- unname(part_of[rec]); if (length(pt) == 0 || is.na(pt)) pt <- "round1"
+  f <- file.path(part_root(pt), cond, paste0(rec, ".TextGrid"))
+  out <- tibble(start = numeric(), end = numeric(), label = character())
+  if (file.exists(f)) {
+    ph <- parse_textgrid(f) %>% filter(str_detect(tolower(tier), "phone"))
+    if (nrow(ph) > 0) out <- ph %>% transmute(start = xmin, end = xmax, label = canon_label(text))
+  }
+  assign(key, out, envir = tg_cache)
+  out
+}
+
+# best-overlapping candidate for each query interval; it must cover at least half of the shorter of the two
+match_best <- function(qs, qe, cs, ce) {
+  if (length(qs) == 0 || length(cs) == 0) return(rep(NA_integer_, length(qs)))
+  ov <- outer(qe, ce, pmin) - outer(qs, cs, pmax)
+  ov[ov < 0] <- 0                                  # (pmax(0, ov) would drop the matrix dimensions)
+  j <- max.col(ov, ties.method = "first")
+  best <- ov[cbind(seq_along(qs), j)]
+  shorter <- pmin(qe - qs, ce[j] - cs[j])
+  ifelse(best > 0 & best >= 0.5 * shorter, j, NA_integer_)
+}
+```
+
+# 1. Data and alignment output (Tables 1 and 2)
+
+## 1.1 Recordings
+
+```{r audio}
+study_stems <- tools::file_path_sans_ext(list.files(p("NigE"), "\\.wav$"))
+audio_csv <- c(list.files(p("audio_checks"), "audio_properties\\.csv$", full.names = TRUE),
+               list.files(cfg$base, "Indian_audio_properties\\.csv$", recursive = TRUE, full.names = TRUE))
+audio_csv <- audio_csv[1]
+if (!is.na(audio_csv)) {
+  audio_props <- read_csv(audio_csv, show_col_types = FALSE) %>%
+    mutate(stem = tools::file_path_sans_ext(file)) %>% filter(stem %in% study_stems)
+  audio_summary <- tibble(
+    recordings   = nrow(audio_props),
+    hours        = sum(audio_props$duration_sec) / 3600,
+    min_s        = min(audio_props$duration_sec), max_s = max(audio_props$duration_sec),
+    n_44100      = sum(audio_props$sample_rate_hz == 44100), n_48000 = sum(audio_props$sample_rate_hz == 48000),
+    mono         = sum(audio_props$channels == 1),
+    broadcast    = sum(str_detect(audio_props$stem, "^btal_")), language_sample = sum(!str_detect(audio_props$stem, "^btal_")))
+  print(kable(audio_summary, digits = 2, caption = "Study recordings (Table 1, first rows)"))
+  add_check("Study recordings", audio_summary$recordings, 100, 0)
+  add_check("Total duration (hours)", audio_summary$hours, 0.83, 0.01)
+  add_check("Broadcast-talk recordings", audio_summary$broadcast, 80, 0)
+} else message("No audio_properties csv found: Table 1 audio rows skipped.")
+# round 2 (folder extension/) and the whole corpus
+ext_report_f <- p("extension", "extension_report.csv")
+empty_secs <- tibble(rec = character(), seconds = numeric(), part = character())
+ext_seconds   <- if (file.exists(ext_report_f)) read_csv(ext_report_f, show_col_types = FALSE) %>% transmute(rec = file, seconds = as.numeric(seconds), part = "round2") else empty_secs
+study_seconds <- if (exists("audio_props")) audio_props %>% transmute(rec = stem, seconds = duration_sec, part = "round1") else empty_secs
+rec_seconds <- bind_rows(study_seconds, ext_seconds)
+print(kable(rec_seconds %>% group_by(part) %>% summarise(recordings = n(), hours = sum(seconds) / 3600, shortest_s = min(seconds), longest_s = max(seconds), .groups = "drop"),
+            digits = 2, caption = "Recordings in the corpus, by transcription round"))
+add_check("Round 2 recordings", sum(rec_seconds$part == "round2"), 31, 0)
+add_check("Round 2 hours", sum(rec_seconds$seconds[rec_seconds$part == "round2"]) / 3600, 4.00, 0.01)
+```
+
+## 1.2 MFA alignment output (Table 2)
+
+```{r table2}
+read_align <- function(cd) {
+  fs <- c(p("alignment_info", paste0(cd, "_alignment_analysis.csv")), p("extension", "alignment_info", paste0(cd, "_alignment_analysis.csv")))
+  fs <- fs[file.exists(fs)]
+  if (length(fs) == 0) stop("Missing alignment_analysis csv for ", cd)
+  map_dfr(fs, function(f) read_csv(f, show_col_types = FALSE, progress = FALSE) %>%
+    transmute(cond = cd, file = tools::file_path_sans_ext(basename(as.character(file))),
+              ll  = suppressWarnings(as.numeric(overall_log_likelihood)),
+              snr = suppressWarnings(as.numeric(snr)),
+              dd  = suppressWarnings(as.numeric(phone_duration_deviation)))) %>%
+    group_by(cond, file) %>%
+    summarise(across(c(ll, snr, dd), ~ if (all(is.na(.x))) NA_real_ else mean(.x, na.rm = TRUE)), .groups = "drop")
+}
+align_all <- map_dfr(cfg$conds, read_align)
+align_shared <- align_all %>% filter(file %in% shared)
+
+summ_align <- function(d) d %>% group_by(cond) %>%
+  summarise(recordings = sum(!is.na(snr)),
+            ll_mean = mean(ll, na.rm = TRUE),  ll_sd = sd_pop(ll[!is.na(ll)]),
+            snr_mean = mean(snr, na.rm = TRUE), snr_sd = sd_pop(snr[!is.na(snr)]), snr_min = min(snr, na.rm = TRUE),
+            at_or_below_3dB = sum(snr <= cfg$low_snr_db, na.rm = TRUE),
+            dd_mean = mean(dd, na.rm = TRUE), dd_sd = sd_pop(dd[!is.na(dd)]), .groups = "drop") %>%
+  mutate(cond = factor(cond, levels = cfg$conds)) %>% arrange(cond)
+table2    <- summ_align(align_shared)                                   # the whole corpus
+table2_r1 <- summ_align(align_shared %>% filter(file %in% study_shared))  # round 1 only: kept as a regression check
+kable(table2, digits = 2, caption = "Table 2. MFA alignment output on the recordings aligned by all four dictionaries (mean and SD over recordings)")
+write_csv(table2, file.path(out_dir, "table2_alignment_output.csv"))
+
+# how much does a recording's SNR differ between dictionaries, and which recordings are at or below 3 dB?
+snr_wide <- align_shared %>% select(cond, file, snr) %>% pivot_wider(names_from = cond, values_from = snr)
+snr_diff <- snr_wide %>% mutate(range = do.call(pmax, c(across(all_of(cfg$conds)), na.rm = TRUE)) -
+                                         do.call(pmin, c(across(all_of(cfg$conds)), na.rm = TRUE)))
+cat("Largest difference in a recording's SNR between dictionaries:", round(max(snr_diff$range, na.rm = TRUE), 2),
+    "dB; median", round(median(snr_diff$range, na.rm = TRUE), 2), "dB\n")
+low_files <- snr_wide %>% filter(if_any(all_of(cfg$conds), ~ .x <= cfg$low_snr_db))
+kable(low_files, digits = 2, caption = "Recordings at or below 3 dB under at least one dictionary")
+
+# recordings that only some dictionaries aligned
+partial <- align_all %>% filter(!is.na(snr)) %>% group_by(file) %>% filter(n() < 4) %>% ungroup() %>%
+  select(cond, file, snr) %>% pivot_wider(names_from = cond, values_from = snr)
+kable(partial, digits = 2, caption = "Recordings with SNR in some dictionaries but not in all four")
+
+add_check("Mean SNR, NigE", table2_r1$snr_mean[table2_r1$cond == "NigE"], 9.39, 0.01)
+add_check("Mean SNR, US", table2_r1$snr_mean[table2_r1$cond == "US"], 9.00, 0.01)
+add_check("Mean log-likelihood, UK", table2_r1$ll_mean[table2_r1$cond == "UK"], -53.80, 0.01)
+add_check("Recordings at or below 3 dB, US", table2_r1$at_or_below_3dB[table2_r1$cond == "US"], 1, 0)
+```
+
+# 2. Reference annotation (Section 2.3)
+
+The 396 tokens were drawn once, from the NigE alignment, by `draw_blind_sample_v2.py` (seed 2027) and are read here from the key file. Annotations are the Praat output files; Praat writes an empty cell as `?`, which is treated as missing. When the same token appears in several files (the re-annotation file `batch_9`), the last file wins.
+
+```{r annotations}
+read_ann <- function(dir) {
+  files <- sort(list.files(dir, "^batch_.*_annotated\\.tsv$", full.names = TRUE))
+  stopifnot(length(files) > 0)
+  d <- map_dfr(files, function(f) read_tsv(f, col_types = cols(.default = col_character()), progress = FALSE) %>%
+                 mutate(src = basename(f)))
+  d <- d %>% mutate(across(-src, ~ ifelse(str_trim(.x) %in% c("?", "--undefined--"), NA_character_, .x)))
+  d %>% group_by(id) %>% slice_tail(n = 1) %>% ungroup()
+}
+ann <- read_ann(cfg$ann_dir)
+key <- read_csv(p("blind_sample_v2", "blind_sample_KEY_do_not_open.csv"),
+                col_types = cols(.default = col_character())) %>%
+  mutate(nurse_token = as.integer(nurse_token))
+
+ann_status <- ann %>%
+  mutate(status = case_when(is.na(label) ~ "not annotated", label == "UNSURE" ~ "cannot judge",
+                            is.na(onset_s) | is.na(offset_s) ~ "no valid mark", TRUE ~ "usable")) %>%
+  count(status)
+kable(ann_status, caption = "Status of the drawn tokens")
+add_check("Tokens drawn", nrow(key), 396, 0)
+
+toks <- ann %>%
+  transmute(id, file, word, lab = canon_label(str_trim(label)), on = as.numeric(onset_s), off = as.numeric(offset_s)) %>%
+  filter(!is.na(lab), lab != "UNSURE", !is.na(on), !is.na(off)) %>%
+  left_join(key %>% select(id, nurse = nurse_token, nige_label), by = "id") %>%
+  mutate(nurse = coalesce(nurse, 0L)) %>% arrange(id)
+cat("Usable annotated tokens:", nrow(toks), "from", n_distinct(toks$file), "recordings;",
+    "tokens outside the shared recordings:", sum(!toks$file %in% shared), "\n")
+add_check("Usable annotated tokens", nrow(toks), 308, 0)
+add_check("Recordings with a usable token", n_distinct(toks$file), 63, 0)
+tok_ids   <- toks$id
+tok_files <- toks$file
+```
+
+```{r sample-composition}
+# tokens per NigE label, drawn and usable (the editor asked for about 30 per category)
+comp <- key %>% filter(nurse_token == 0) %>% count(nige_label, name = "drawn") %>%
+  left_join(toks %>% filter(nurse == 0) %>% count(nige_label, name = "usable"), by = "nige_label") %>%
+  mutate(usable = coalesce(usable, 0L))
+kable(comp, caption = "Tokens per NigE vowel label: drawn and usable")
+cat("NURSE tokens drawn:", sum(key$nurse_token == 1), "| usable:", sum(toks$nurse == 1), "\n")
+add_check("NURSE tokens usable", sum(toks$nurse == 1), 31, 0)
+
+# phonetic context coverage of the drawn tokens (preceding and following class, from the key)
+if (all(c("preceding", "following") %in% names(key))) {
+  ctx <- key %>% filter(nurse_token == 0) %>% group_by(nige_label) %>%
+    summarise(preceding_classes = n_distinct(preceding), following_classes = n_distinct(following), .groups = "drop")
+  print(kable(ctx, caption = "Number of distinct preceding and following context classes per vowel (drawn tokens)"))
+}
+
+# vowel-numbering correction (the first draw did not count diphthongs when numbering the vowels of a word)
+numchk <- p("blind_sample_v2", "vowel_numbering_check.csv")
+if (file.exists(numchk)) {
+  nc <- read_csv(numchk, show_col_types = FALSE)
+  cat("Tokens whose vowel number changed:", sum(nc$changed == 1), "of", nrow(nc), "\n")
+  add_check("Tokens with a corrected vowel number", sum(nc$changed == 1), 11, 0)
+}
+```
+
+## 2.1 Table 1 (corpus and alignment summary)
+
+```{r table1}
+hrs <- function(recs) sum(rec_seconds$seconds[rec_seconds$rec %in% recs]) / 3600
+r1 <- rec_seconds$rec[rec_seconds$part == "round1"]; r2 <- rec_seconds$rec[rec_seconds$part == "round2"]
+table1 <- tibble(
+  item = c("Audio files in the source folder", "   left out by design (dem_09, dem_11, dem_14)", "   transcribed, but outside the corpus",
+           "Recordings in the corpus", "   transcribed in round 1", "   transcribed in round 2",
+           "Recordings aligned by all four dictionaries (analysed)", "   round 1", "   round 2"),
+  recordings = c(138L, 3L, 4L, nrow(rec_seconds), length(r1), length(r2), length(shared), length(study_shared), length(ext_shared)),
+  hours = c(5.84, 0.82, 0.19, hrs(rec_seconds$rec), hrs(r1), hrs(r2), hrs(shared), hrs(study_shared), hrs(ext_shared)))
+kable(table1, digits = 2, caption = "Table 1. The corpus: from the source folder to the analysed recordings (the first three rows come from the source folder inventory, reconcile_old_new.py)")
+write_csv(table1, file.path(out_dir, "table1_corpus_flow.csv"))
+add_check("Hours of the corpus", hrs(rec_seconds$rec), 4.83, 0.02)
+add_check("Hours aligned by all four dictionaries, whole corpus", hrs(shared), 3.76, 0.02)
+table1b <- tibble(
+  item  = c("Vowel tokens drawn for the blind sample", "Vowel tokens with a usable annotation", "Usable tokens from broadcast talk", "Usable tokens from other recordings"),
+  value = c(nrow(key), nrow(toks), sum(str_detect(toks$file, "^btal_")), sum(!str_detect(toks$file, "^btal_"))))
+kable(table1b, caption = "Table 1 (continued): the reference sample")
+add_check("Usable tokens from broadcast talk", sum(str_detect(toks$file, "^btal_")), 278, 0)
+```
+
+# 3. Scoring against the four dictionaries (Section 3.1 to 3.3)
+
+Each annotated vowel is compared with the vowel intervals of each alignment. With `match_rule = "overlap"`, a dictionary finds the vowel when one of its vowel intervals overlaps the annotated vowel by at least half of the shorter of the two. With `"midpoint"`, the midpoint of the annotated vowel must fall inside a vowel interval. Labels are compared at three levels (same symbol; same symbol ignoring length; same category).
+
+```{r score}
+score_one <- function(cond, rec, on, off, lab) {
+  ph  <- read_phones(cond, rec)
+  mid <- (on + off) / 2
+  idx <- which(ph$start <= mid & mid < ph$end)[1]          # interval under the midpoint of the annotated vowel
+  at_lab <- NA_character_; hit_lab <- NA_character_; hit_s <- NA_real_; hit_e <- NA_real_; det <- FALSE
+  if (!is.na(idx)) {
+    at_lab <- hit_lab <- ph$label[idx]; hit_s <- ph$start[idx]; hit_e <- ph$end[idx]
+    det <- is_vowel(hit_lab) && (hit_e - hit_s) > 0
+  }
+  if (cfg$match_rule == "overlap") {
+    det <- FALSE
+    v <- which(is_vowel(ph$label) & ph$end > ph$start)
+    if (length(v) > 0) {
+      ov <- pmax(0, pmin(off, ph$end[v]) - pmax(on, ph$start[v]))
+      j <- which.max(ov); b <- v[j]
+      if (ov[j] >= 0.5 * min(off - on, ph$end[b] - ph$start[b])) {
+        det <- TRUE; hit_lab <- ph$label[b]; hit_s <- ph$start[b]; hit_e <- ph$end[b]
+      }
+    }
+  }
+  m <- if (det) hit_lab else NA_character_
+  model <- if (det) hit_lab else if (is.na(at_lab)) "(none)" else paste0("(", ifelse(at_lab == "", "silence", at_lab), ")")
+  tibble(detected  = as.integer(det), model = model,
+         strict    = as.integer(det && m == lab),
+         nolen     = as.integer(det && sub("ː+$", "", m) == sub("ː+$", "", lab)),
+         cat       = as.integer(det && category(m) == category(lab)),
+         mono2diph = as.integer(det && m %in% DIPH && !(lab %in% DIPH)),
+         on_err    = if (det) (hit_s - on) * 1000 else NA_real_,
+         off_err   = if (det) (hit_e - off) * 1000 else NA_real_)
+}
+
+scored <- tidyr::expand_grid(toks, cond = cfg$conds) %>%
+  mutate(res = pmap(list(cond, file, on, off, lab), score_one)) %>%
+  tidyr::unnest(res) %>%
+  mutate(etype = case_when(detected == 0 ~ "M", cat == 0 ~ "S", strict == 0 ~ "D", TRUE ~ "A"),
+         dur_diff = off_err - on_err)
+cat("Scored rows:", nrow(scored), "(tokens x dictionaries)\n")
+write_csv(scored, file.path(out_dir, "token_level_scores_R.csv"))
+
+metric_vec <- function(cd, col) { d <- scored[scored$cond == cd, ]; d <- d[match(tok_ids, d$id), ]; d[[col]] }
+```
+
+## 3.1 Agreement with the annotator (Table 3) and paired differences
+
+Intervals come from a bootstrap over recordings (all tokens of a recording are resampled together).
+
+```{r bootstrap}
+set.seed(2028)
+idx_by_file <- split(seq_along(tok_files), tok_files)
+boot_list <- replicate(cfg$B, unlist(idx_by_file[sample(names(idx_by_file), replace = TRUE)], use.names = FALSE),
+                       simplify = FALSE)
+ci_pct <- function(x) {
+  bs <- vapply(boot_list, function(i) mean(x[i]), numeric(1)) * 100
+  c(est = mean(x) * 100, lo = unname(quantile(bs, .025)), hi = unname(quantile(bs, .975)))
+}
+table3 <- map_dfr(cfg$conds, function(cd) {
+  f <- ci_pct(metric_vec(cd, "detected")); s <- ci_pct(metric_vec(cd, "strict")); k <- ci_pct(metric_vec(cd, "cat"))
+  tibble(dictionary = cd, n = length(tok_ids),
+         found = f[["est"]], found_lo = f[["lo"]], found_hi = f[["hi"]],
+         same_symbol = s[["est"]], same_symbol_lo = s[["lo"]], same_symbol_hi = s[["hi"]],
+         same_symbol_no_length = mean(metric_vec(cd, "nolen")) * 100,
+         same_category = k[["est"]], same_category_lo = k[["lo"]], same_category_hi = k[["hi"]],
+         nf = 100 - k[["est"]], mono_to_diph = mean(metric_vec(cd, "mono2diph")) * 100)
+})
+kable(table3, digits = 1, caption = "Table 3. Agreement of each dictionary with the annotator")
+write_csv(table3, file.path(out_dir, "table3_agreement.csv"))
+
+paired <- map_dfr(c("detected", "strict", "nolen", "cat"), function(col) {
+  map_dfr(cfg$conds[-1], function(cd) {
+    d <- metric_vec("NigE", col) - metric_vec(cd, col)
+    bs <- vapply(boot_list, function(i) mean(d[i]), numeric(1)) * 100
+    tibble(measure = col, versus = cd, diff_points = mean(d) * 100, lo = unname(quantile(bs, .025)), hi = unname(quantile(bs, .975)))
+  })
+})
+kable(paired, digits = 1, caption = "Paired difference, NigE minus the other dictionary (percentage points)")
+write_csv(paired, file.path(out_dir, "paired_differences_vs_NigE.csv"))
+
+for (cd in cfg$conds) {
+  r <- table3[table3$dictionary == cd, ]
+  add_check(paste("Found %,", cd), r$found, c(NigE = 93.5, Indian = 86.7, UK = 90.6, US = 89.0)[[cd]])
+  add_check(paste("Same symbol %,", cd), r$same_symbol, c(NigE = 42.5, Indian = 13.6, UK = 13.6, US = 13.3)[[cd]])
+  add_check(paste("Same symbol, length ignored %,", cd), r$same_symbol_no_length, c(NigE = 58.4, Indian = 31.2, UK = 24.0, US = 17.9)[[cd]])
+  add_check(paste("Same category %,", cd), r$same_category, c(NigE = 77.3, Indian = 46.8, UK = 40.3, US = 41.6)[[cd]])
+  add_check(paste("Monophthong returned as diphthong %,", cd), r$mono_to_diph, c(NigE = 1.0, Indian = 1.0, UK = 11.0, US = 11.4)[[cd]])
+}
+add_check("Paired category difference, NigE - UK", paired$diff_points[paired$measure == "cat" & paired$versus == "UK"], 37.0, 0.1)
+```
+
+## 3.2 Error types (Table 4)
+
+```{r table4}
+table4 <- scored %>% count(cond, etype) %>% group_by(cond) %>% mutate(pct = 100 * n / sum(n)) %>% ungroup() %>%
+  select(-n) %>% pivot_wider(names_from = cond, values_from = pct, values_fill = 0) %>%
+  select(etype, all_of(cfg$conds)) %>% arrange(factor(etype, levels = c("M", "S", "D", "A")))
+kable(table4, digits = 1, caption = "Table 4. Share of the annotated vowels by error type (M not found, S different category, D same category and different symbol, A same symbol)")
+write_csv(table4, file.path(out_dir, "table4_error_types.csv"))
+for (cd in cfg$conds) {
+  add_check(paste("Error type M %,", cd), table4[[cd]][table4$etype == "M"], c(NigE = 6.5, Indian = 13.3, UK = 9.4, US = 11.0)[[cd]])
+  add_check(paste("Error type S %,", cd), table4[[cd]][table4$etype == "S"], c(NigE = 16.2, Indian = 39.9, UK = 50.3, US = 47.4)[[cd]])
+}
+# the NigE dictionary's same-category, different-symbol cases: how many differ in length only?
+d_cases <- scored %>% filter(cond == "NigE", etype == "D")
+cat("NigE D cases:", nrow(d_cases), "| length-only differences:",
+    sum(sub("ː+$", "", d_cases$model) == sub("ː+$", "", d_cases$lab)), "\n")
+add_check("NigE D cases", nrow(d_cases), 107, 0)
+```
+
+## 3.3 Boundaries and duration (Table 5)
+
+```{r table5}
+table5 <- scored %>% filter(detected == 1) %>% group_by(cond) %>%
+  summarise(n_found = n(),
+            within5  = 100 * mean(abs(on_err) <= 5  & abs(off_err) <= 5),
+            within10 = 100 * mean(abs(on_err) <= 10 & abs(off_err) <= 10),
+            within20 = 100 * mean(abs(on_err) <= 20 & abs(off_err) <= 20),
+            median_onset_ms = median(on_err), median_offset_ms = median(off_err), .groups = "drop") %>%
+  mutate(cond = factor(cond, levels = cfg$conds)) %>% arrange(cond)
+kable(table5, digits = 1, caption = "Table 5. Boundary agreement for vowels that were found (aligner minus annotator)")
+write_csv(table5, file.path(out_dir, "table5_boundaries.csv"))
+for (cd in cfg$conds) {
+  add_check(paste("Within 20 ms %,", cd), table5$within20[table5$cond == cd], c(NigE = 42.7, Indian = 44.6, UK = 42.3, US = 40.5)[[cd]])
+  add_check(paste("Median onset difference (ms),", cd), table5$median_onset_ms[table5$cond == cd], c(NigE = -1.1, Indian = 1.7, UK = 1.5, US = 1.6)[[cd]])
+}
+```
+
+Duration is compared only for vowels whose label matches the annotator's. Medians come from different sets of tokens in different dictionaries, so the dictionaries are also compared on the same tokens: vowels labelled correctly under both NigE and the other dictionary.
+
+```{r duration}
+dur_unpaired <- scored %>% filter(nolen == 1) %>% group_by(cond) %>%
+  summarise(n = n(), median_diff_ms = median(dur_diff), q25 = unname(quantile(dur_diff, .25)), q75 = unname(quantile(dur_diff, .75)),
+            pct_longer_20 = 100 * mean(dur_diff >= 20), pct_shorter_20 = 100 * mean(dur_diff <= -20), .groups = "drop") %>%
+  mutate(cond = factor(cond, levels = cfg$conds)) %>% arrange(cond)
+kable(dur_unpaired, digits = 1, caption = "Aligned minus annotated duration, vowels with the same symbol (length ignored)")
+
+dur_paired <- function(level) {
+  a <- scored[scored$cond == "NigE", ]; a <- a[match(tok_ids, a$id), ]
+  map_dfr(cfg$conds[-1], function(cd) {
+    b <- scored[scored$cond == cd, ]; b <- b[match(tok_ids, b$id), ]
+    ok <- a[[level]] == 1 & b[[level]] == 1 & a$detected == 1 & b$detected == 1
+    d <- b$dur_diff - a$dur_diff
+    bs <- vapply(boot_list, function(i) { j <- i[ok[i]]; if (length(j)) mean(d[j]) else NA_real_ }, numeric(1))
+    tibble(level = level, versus = cd, n = sum(ok), mean_diff_ms = mean(d[ok]), median_diff_ms = median(d[ok]),
+           lo = unname(quantile(bs, .025, na.rm = TRUE)), hi = unname(quantile(bs, .975, na.rm = TRUE)))
+  })
+}
+dur_pair_tab <- bind_rows(dur_paired("nolen"), dur_paired("strict"), dur_paired("cat"))
+kable(dur_pair_tab, digits = 1, caption = "Paired difference in aligned duration, dictionary minus NigE, tokens labelled correctly under both")
+write_csv(dur_pair_tab, file.path(out_dir, "duration_paired.csv"))
+add_check("Paired duration difference, Indian (same symbol, length ignored)", dur_pair_tab$mean_diff_ms[dur_pair_tab$level == "nolen" & dur_pair_tab$versus == "Indian"], 0.6, 0.2)
+add_check("Paired duration difference, US (same symbol, length ignored)", dur_pair_tab$mean_diff_ms[dur_pair_tab$level == "nolen" & dur_pair_tab$versus == "US"], -2.1, 0.2)
+```
+
+## 3.4 Which vowels (Figures 2 and 3, Tables 6 and glides)
+
+```{r fig2, fig.width=9, fig.height=4}
+ord <- toks %>% count(lab, sort = TRUE) %>% filter(n >= 10) %>% pull(lab)
+fig2_d <- scored %>% filter(lab %in% ord) %>% group_by(lab, cond) %>%
+  summarise(n = n(), nf = 100 - 100 * mean(cat), .groups = "drop") %>%
+  mutate(lab = factor(lab, levels = ord), cond = factor(cond, levels = cfg$conds))
+fig2 <- ggplot(fig2_d, aes(lab, nf, fill = cond)) +
+  geom_col(position = position_dodge(.85), width = .8) + scale_fill_manual(values = pal) +
+  labs(x = "Vowel marked by the annotator", y = "Tokens per 100 whose category differs", fill = NULL) +
+  theme_minimal(base_size = 12) + theme(legend.position = "top")
+print(fig2); ggsave(file.path(out_dir, "figure2_category_errors_by_vowel.png"), fig2, width = 9, height = 4, dpi = 200)
+kable(fig2_d %>% select(-n) %>% pivot_wider(names_from = cond, values_from = nf), digits = 0, caption = "Category errors per 100 annotated vowels, by vowel (Figure 2)")
+```
+
+```{r fig3, fig.width=11, fig.height=9}
+rows_keep <- c("i", "ɛ", "ɔ", "e", "a", "iː", "u", "o", "aː", "ə", "ʊ", "ɛː", "ɜ")
+conf_long <- map_dfr(cfg$conds, function(cd) {
+  d <- scored %>% filter(cond == cd, lab %in% rows_keep)
+  is_none <- str_starts(d$model, fixed("("))
+  vow_tot <- d %>% filter(!str_starts(model, fixed("("))) %>% count(model, sort = TRUE)
+  diag <- intersect(rows_keep, vow_tot$model)
+  keep <- unique(c(diag, vow_tot$model))[seq_len(min(13, length(unique(c(diag, vow_tot$model)))))]
+  keep <- keep[order(-vow_tot$n[match(keep, vow_tot$model)])]
+  d %>% mutate(col = ifelse(is_none, "none", ifelse(model %in% keep, model, "oth."))) %>%
+    group_by(lab) %>% mutate(row_n = n()) %>% ungroup() %>%
+    count(lab, row_n, col) %>% group_by(lab) %>% mutate(pct = 100 * n / sum(n)) %>% ungroup() %>%
+    mutate(cond = cd, col_order = match(col, c(keep, "oth.", "none")))
+})
+conf_long <- conf_long %>%
+  mutate(x = factor(paste(cond, col, sep = "||"), levels = unique(paste(cond, col, sep = "||")[order(match(cond, cfg$conds), col_order)])),
+         y = factor(paste0(lab, " (", row_n, ")"), levels = rev(paste0(rows_keep, " (", conf_long$row_n[match(rows_keep, conf_long$lab)], ")"))),
+         cond = factor(cond, levels = cfg$conds))
+fig3 <- ggplot(conf_long, aes(x, y, fill = pct)) + geom_tile() +
+  geom_text(data = conf_long %>% filter(pct >= 10), aes(label = round(pct)), size = 3) +
+  scale_fill_gradient(low = "white", high = "#08519C", limits = c(0, 100), guide = "none") +
+  scale_x_discrete(labels = function(x) sub("^.*\\|\\|", "", x)) +
+  facet_wrap(~ cond, scales = "free_x", ncol = 2) +
+  labs(x = "Label returned by the aligner", y = "Vowel marked (n)") + theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank())
+print(fig3); ggsave(file.path(out_dir, "figure3_confusion_matrices.png"), fig3, width = 11, height = 9, dpi = 200)
+# the matrices as counts, for the supplement
+walk(cfg$conds, function(cd) write_csv(scored %>% filter(cond == cd) %>% count(lab, model) %>% pivot_wider(names_from = model, values_from = n, values_fill = 0),
+                                       file.path(out_dir, paste0("confusion_", cd, ".csv"))))
+```
+
+```{r nurse-glides}
+nurse <- scored %>% filter(nurse == 1)
+cat("NURSE tokens:", n_distinct(nurse$id), "\n")
+kable(nurse %>% filter(cond == "NigE") %>% count(lab, sort = TRUE), caption = "Table 6a. Labels marked by the annotator for the NURSE tokens")
+kable(nurse %>% count(cond, model) %>% arrange(cond, desc(n)) %>% group_by(cond) %>% slice_head(n = 5), caption = "Table 6b. Labels returned for the NURSE tokens, by dictionary (five most frequent)")
+
+glides <- toks %>% filter(!(nige_label %in% DIPH)) %>% group_by(nige_label) %>%
+  summarise(n_tokens = n(), n_heard_as_glide = sum(lab %in% DIPH), glide_labels = paste(sort(unique(lab[lab %in% DIPH])), collapse = ","), .groups = "drop")
+kable(glides, caption = "Glides marked by the annotator, by NigE label")
+write_csv(glides, file.path(out_dir, "glides_heard_by_nige_label.csv"))
+```
+
+## 3.5 Agreement between dictionaries, and two sensitivity checks
+
+```{r pairwise}
+wide <- scored %>% select(id, cond, model, detected) %>% pivot_wider(names_from = cond, values_from = c(model, detected))
+pairs <- combn(cfg$conds, 2, simplify = FALSE)
+pair_tab <- map_dfr(pairs, function(pr) {
+  a <- wide[[paste0("model_", pr[1])]]; b <- wide[[paste0("model_", pr[2])]]
+  both <- wide[[paste0("detected_", pr[1])]] == 1 & wide[[paste0("detected_", pr[2])]] == 1
+  tibble(pair = paste(pr, collapse = " - "), both_found = sum(both), same_symbol_pct = 100 * mean(a[both] == b[both]))
+})
+kable(pair_tab, digits = 1, caption = "Share of tokens for which two dictionaries return the same symbol (both found a vowel)")
+add_check("Indian - UK same symbol %", pair_tab$same_symbol_pct[pair_tab$pair == "Indian - UK"], 82.5, 0.2)
+```
+
+```{r sensitivity}
+# (a) without the recording at or below 3 dB
+sens <- scored %>% filter(file != cfg$low_snr_file) %>% group_by(cond) %>%
+  summarise(n = n(), found = 100 * mean(detected), same_category = 100 * mean(cat), .groups = "drop") %>%
+  mutate(cond = factor(cond, levels = cfg$conds)) %>% arrange(cond)
+kable(sens, digits = 1, caption = paste("Agreement without", cfg$low_snr_file))
+add_check("Same category without the low-SNR recording, NigE", sens$same_category[sens$cond == "NigE"], 78.2, 0.1)
+cat("Tokens from", cfg$low_snr_file, ":", sum(toks$file == cfg$low_snr_file), "\n")
+add_check("Annotated tokens from the low-SNR recording", sum(toks$file == cfg$low_snr_file), 15, 0)
+```
+
+```{r midpoint-rule, eval=FALSE}
+# (b) the stricter midpoint rule: set cfg$match_rule <- "midpoint" in the config chunk and knit again,
+# then compare table3 (the supplementary table in the manuscript).
+```
+
+# 4. Formants (Section 3.4)
+
+`new-fave` writes one row every 2 ms for every vowel it tracked. A token is one vowel (one `id`). Midpoint F1 and F2 are the smoothed tracks (`F1_s`, `F2_s`) interpolated at 50% of the vowel; trajectories are the same tracks interpolated at 20 equal-duration bins. Tokens are every vowel that `new-fave` tracked (its own minimum is 50 ms of vowel duration); only tracks with fewer than five points or a span under `min_span` are dropped. Midpoints are Lobanov-normalised (z-scores) by recording and dictionary, for recordings with at least 30 tracked vowels.
+
+```{r read-tracks}
+cent <- (seq_len(cfg$n_bins) - 0.5) / cfg$n_bins
+ap <- function(t, y, s, e, x0) {
+  if (!is.finite(e - s) || e <= s) return(rep(NA_real_, length(x0)))
+  approx((t - s) / (e - s), y, xout = x0, rule = 2, ties = mean)$y
+}
+read_tracks_dir <- function(dir, cond, keep) {
+  files <- list.files(dir, "tracks\\.csv$", full.names = TRUE)
+  nm <- basename(files)
+  stems <- ifelse(str_detect(nm, "_tracks\\.csv$"), str_remove(nm, "_tracks\\.csv$"), str_remove(nm, "tracks\\.csv$"))
+  sel <- stems %in% keep
+  map2_dfr(files[sel], stems[sel], function(f, rec) {
+    d <- read_csv(f, col_select = any_of(c("id", "label", "time", "F1", "F2", "F1_s", "F2_s")),
+                  show_col_types = FALSE, progress = FALSE)
+    if (!"F1_s" %in% names(d)) d$F1_s <- NA_real_
+    if (!"F2_s" %in% names(d)) d$F2_s <- NA_real_
+    d <- d %>% mutate(f1 = coalesce(F1_s, F1), f2 = coalesce(F2_s, F2)) %>% filter(!is.na(time), !is.na(f1), !is.na(f2))
+    if (nrow(d) == 0) return(NULL)
+    d$id <- as.character(d$id)
+    if (n_distinct(d$id) <= 2 && nrow(d) > 300) {      # id is not one per vowel: split on a label change or a gap in time
+      d <- d %>% arrange(time) %>%
+        mutate(id = paste0("tok", cumsum(label != lag(label, default = dplyr::first(label)) |
+                                         (time - lag(time, default = dplyr::first(time))) > 0.01)))
+    }
+    d %>% group_by(id) %>% filter(n() >= 5) %>% arrange(time, .by_group = TRUE) %>%
+      summarise(label = canon_label(dplyr::first(label)), start = min(time), end = max(time), span = end - start,
+                f1_50 = ap(time, f1, start, end, 0.5)[1], f2_50 = ap(time, f2, start, end, 0.5)[1],
+                t1 = list(ap(time, f1, start, end, cent)), t2 = list(ap(time, f2, start, end, cent)), .groups = "drop") %>%
+      filter(span > 0) %>% mutate(cond = cond, rec = rec)
+  })
+}
+read_tracks <- function(cond) {
+  map_dfr(unique(corpus_map$part), function(pt) {
+    d <- read_tracks_dir(file.path(part_root(pt), "fave_runs", cond), cond, corpus_map$rec[corpus_map$part == pt])
+    if (nrow(d) > 0) d$part <- pt
+    d
+  })
+}
+tracks_all <- map_dfr(cfg$conds, read_tracks)
+print(tracks_all %>% count(cond, name = "tokens") %>% as.data.frame())
+tracks_by <- split(tracks_all, paste(tracks_all$cond, tracks_all$rec, sep = "||"))
+get_tracks <- function(cd, rec) tracks_by[[paste(cd, rec, sep = "||")]]
+```
+
+## 4.1 Availability (Table 7)
+
+```{r table7}
+avail_one <- function(cd) {
+  map_dfr(shared, function(rec) {
+    iv <- read_phones(cd, rec) %>% filter(str_detect(label, vowel_re)) %>% mutate(dur = end - start)
+    tk <- get_tracks(cd, rec)
+    j <- if (is.null(tk) || nrow(iv) == 0) rep(NA_integer_, nrow(iv)) else match_best(iv$start, iv$end, tk$start, tk$end)
+    iv %>% mutate(tracked = !is.na(j), rec = rec)
+  }) %>% mutate(cond = cd)
+}
+iv_all <- map_dfr(cfg$conds, avail_one)
+iv_all$part <- unname(part_of[iv_all$rec])
+table7 <- iv_all %>% group_by(cond) %>%
+  summarise(vowel_intervals = n(), ge50ms = sum(dur >= cfg$min_dur),
+            tracked_ge50 = sum(tracked & dur >= cfg$min_dur), n_tracked = sum(tracked),
+            pct_of_all = 100 * n_tracked / vowel_intervals,
+            pct_of_ge50 = 100 * tracked_ge50 / ge50ms, .groups = "drop") %>%
+  mutate(cond = factor(cond, levels = cfg$conds)) %>% arrange(cond)
+kable(table7, digits = 1, caption = "Table 7. Formant availability by dictionary")
+write_csv(table7, file.path(out_dir, "table7_formant_availability.csv"))
+by_dur <- iv_all %>%
+  mutate(bin = cut(dur, c(-Inf, .03, .05, .07, .10, Inf), right = FALSE,
+                   labels = c("<30 ms", "30-50 ms", "50-70 ms", "70-100 ms", ">=100 ms"))) %>%
+  group_by(cond, bin) %>% summarise(intervals = n(), tracked = sum(tracked), .groups = "drop")
+kable(by_dur, caption = "Tracked intervals by interval duration")
+table7_by_part <- iv_all %>% group_by(part, cond) %>%
+  summarise(recordings = n_distinct(rec), vowel_intervals = n(), ge50ms = sum(dur >= cfg$min_dur), n_tracked = sum(tracked), .groups = "drop") %>%
+  mutate(cond = factor(cond, levels = cfg$conds)) %>% arrange(part, cond)
+kable(table7_by_part, caption = "The same, by transcription round (the two rounds should behave alike)")
+write_csv(table7_by_part, file.path(out_dir, "table7_by_round.csv"))
+table7_r1 <- table7_by_part %>% filter(part == "round1")      # round 1 only: kept as a regression check
+for (cd in cfg$conds) {
+  r <- table7_r1[table7_r1$cond == cd, ]
+  add_check(paste("Vowel intervals, round 1,", cd), r$vowel_intervals, c(NigE = 6819, Indian = 6661, UK = 6820, US = 6813)[[cd]], 0)
+  add_check(paste("Tracked vowels, round 1,", cd), r$n_tracked, c(NigE = 5118, Indian = 4962, UK = 5128, US = 5028)[[cd]], 0)
+}
+```
+
+## 4.2 Normalisation and the dictionary's effect on the measurement
+
+```{r normalise}
+zpar <- tracks_all %>% filter(span >= cfg$min_span) %>% group_by(cond, rec) %>% filter(n() >= cfg$min_tokens_norm) %>%
+  summarise(m1 = mean(f1_50), s1 = sd_pop(f1_50), m2 = mean(f2_50), s2 = sd_pop(f2_50), .groups = "drop")
+tracks_z <- tracks_all %>% filter(span >= cfg$min_span) %>% inner_join(zpar, by = c("cond", "rec")) %>%
+  mutate(z1 = (f1_50 - m1) / s1, z2 = (f2_50 - m2) / s2)
+cat("Recordings normalised per dictionary:\n"); print(zpar %>% count(cond) %>% as.data.frame())
+cat("Tokens in the normalised set per dictionary:\n"); print(tracks_z %>% count(cond) %>% as.data.frame())
+tz_by <- split(tracks_z, paste(tracks_z$cond, tracks_z$rec, sep = "||"))
+# label-level summaries and figures use at most cap_per_rec vowels per recording and dictionary: long recordings (unscripted speeches)
+# would otherwise decide where the categories lie
+set.seed(2031)
+tracks_z_cap <- tracks_z %>% group_by(cond, rec) %>% group_modify(~ dplyr::slice_sample(.x, n = min(cfg$cap_per_rec, nrow(.x)))) %>% ungroup()
+cat("Tokens after the per-recording cap:\n"); print(tracks_z_cap %>% count(cond) %>% as.data.frame())
+```
+
+```{r stability}
+# the same vowel under the NigE dictionary and another one: how different are the midpoint formants (Hz)?
+stab <- map_dfr(cfg$conds[-1], function(cd) {
+  map_dfr(shared, function(rec) {
+    a <- get_tracks("NigE", rec); b <- get_tracks(cd, rec)
+    if (is.null(a) || is.null(b)) return(NULL)
+    a <- a %>% filter(span >= cfg$min_span); b <- b %>% filter(span >= cfg$min_span)
+    if (nrow(a) == 0 || nrow(b) == 0) return(NULL)
+    j <- match_best(a$start, a$end, b$start, b$end); ok <- !is.na(j)
+    tibble(rec = rec, d1 = abs(a$f1_50[ok] - b$f1_50[j[ok]]), d2 = abs(a$f2_50[ok] - b$f2_50[j[ok]]))
+  }) %>% mutate(cond = cd)
+})
+stab_tab <- stab %>% group_by(cond) %>%
+  summarise(matched = n(), median_abs_dF1 = median(d1), p90_abs_dF1 = quantile(d1, .9),
+            median_abs_dF2 = median(d2), p90_abs_dF2 = quantile(d2, .9), .groups = "drop")
+kable(stab_tab, digits = 1, caption = "Midpoint formants of matched vowels, dictionary versus NigE (absolute difference, Hz)")
+write_csv(stab_tab, file.path(out_dir, "stability_vs_NigE.csv"))
+set.seed(2032)
+stab_cap_tab <- stab %>% group_by(cond, rec) %>% group_modify(~ dplyr::slice_sample(.x, n = min(cfg$cap_per_rec, nrow(.x)))) %>% ungroup() %>% group_by(cond) %>%
+  summarise(matched = n(), median_abs_dF1 = median(d1), p90_abs_dF1 = quantile(d1, .9),
+            median_abs_dF2 = median(d2), p90_abs_dF2 = quantile(d2, .9), .groups = "drop")
+kable(stab_cap_tab, digits = 1, caption = paste("The same, with at most", cfg$cap_per_rec, "matched vowels per recording (sensitivity)"))
+```
+
+## 4.3 Annotated vowels with formants, and how well each set of labels sorts them
+
+```{r annotated-formants}
+find_tok <- function(cd, rec, on, off) {
+  none <- tibble(tlabel = NA_character_, z1 = NA_real_, z2 = NA_real_)
+  tk <- tz_by[[paste(cd, rec, sep = "||")]]
+  if (is.null(tk)) return(none)
+  j <- match_best(on, off, tk$start, tk$end)
+  if (is.na(j)) none else tibble(tlabel = tk$label[j], z1 = tk$z1[j], z2 = tk$z2[j])
+}
+tk_ann <- tidyr::expand_grid(toks %>% select(id, file, on, off, lab, nurse), cond = cfg$conds) %>%
+  mutate(res = pmap(list(cond, file, on, off), find_tok)) %>% tidyr::unnest(res)
+with_f <- tk_ann %>% group_by(cond) %>% summarise(annotated_with_formants = sum(!is.na(z1)), of = n(), .groups = "drop")
+kable(with_f, caption = "Annotated vowels with formants, by dictionary")
+S_ids <- tk_ann %>% filter(!is.na(z1)) %>% count(id) %>% filter(n == length(cfg$conds)) %>% pull(id)
+cat("Annotated vowels with formants under all four dictionaries:", length(S_ids), "\n")
+S <- tk_ann %>% filter(id %in% S_ids)
+
+adj_r2 <- function(x, g) {
+  n <- length(x); k <- n_distinct(g)
+  if (n < 5 || k < 2) return(NA_real_)
+  gm <- mean(x); sst <- sum((x - gm)^2)
+  ssb <- sum(tapply(x, g, function(v) length(v) * (mean(v) - gm)^2))
+  e <- ssb / sst
+  1 - (1 - e) * (n - 1) / max(n - k, 1)
+}
+mean_z <- S %>% group_by(id) %>% summarise(lab = dplyr::first(lab), nurse = dplyr::first(nurse), z1 = mean(z1), z2 = mean(z2), .groups = "drop")
+schemes <- bind_rows(
+  mean_z %>% transmute(scheme = "Annotator", label = lab, nurse, z1, z2),   # the annotator's labels, on the mean of the four dictionaries' values
+  S %>% transmute(scheme = cond, label = tlabel, nurse, z1, z2))
+lab_var <- schemes %>% group_by(scheme) %>%
+  summarise(categories = n_distinct(label), adj_R2_F1 = adj_r2(z1, label), adj_R2_F2 = adj_r2(z2, label), .groups = "drop") %>%
+  mutate(scheme = factor(scheme, levels = c("Annotator", cfg$conds))) %>% arrange(scheme)
+kable(lab_var, digits = 2, caption = "Share of the variance in normalised F1 and F2 explained by the labels (adjusted R-squared), same tokens")
+write_csv(lab_var, file.path(out_dir, "label_variance_explained.csv"))
+```
+
+```{r nurse-formants}
+nu <- schemes %>% filter(nurse == 1)
+nurse_means <- nu %>% group_by(scheme, label) %>% summarise(n = n(), F1z = mean(z1), F2z = mean(z2), .groups = "drop") %>%
+  mutate(scheme = factor(scheme, levels = c("Annotator", cfg$conds))) %>% arrange(scheme, desc(n))
+kable(nurse_means, digits = 2, caption = "NURSE tokens with formants under all four dictionaries: mean normalised F1 and F2 by label")
+nu_tok <- mean_z %>% filter(nurse == 1)
+cat("NURSE tokens with formants under all dictionaries:", nrow(nu_tok),
+    "| spread (SD) of F1z:", round(sd_pop(nu_tok$z1), 2), "and F2z:", round(sd_pop(nu_tok$z2), 2), "\n")
+write_csv(nurse_means, file.path(out_dir, "nurse_formants_by_label.csv"))
+```
+
+## 4.4 Trajectories
+
+Path length is the distance travelled through the normalised F1-F2 plane over bins 3 to 18 of the 20; net displacement is the distance between the first and last of those bins.
+
+```{r trajectories}
+path_stats <- function(t1, t2, m1, s1, m2, s2) {
+  b <- 3:(cfg$n_bins - 2)
+  x <- ((t1 - m1) / s1)[b]; y <- ((t2 - m2) / s2)[b]
+  c(path = sum(sqrt(diff(x)^2 + diff(y)^2)), net = sqrt((x[length(x)] - x[1])^2 + (y[length(y)] - y[1])^2))
+}
+traj <- tracks_z_cap %>% mutate(ps = pmap(list(t1, t2, m1, s1, m2, s2), path_stats),
+                            path = map_dbl(ps, 1), net = map_dbl(ps, 2)) %>% select(-ps)
+traj_tab <- traj %>% group_by(cond, label) %>% filter(n() >= cfg$min_n_traj) %>%
+  summarise(n = n(), median_path = median(path), median_net = median(net), .groups = "drop") %>%
+  mutate(cond = factor(cond, levels = cfg$conds)) %>% arrange(cond, desc(n))
+kable(traj_tab %>% group_by(cond) %>% slice_head(n = 14), digits = 2, caption = "Median trajectory length by label (the 14 most frequent labels per dictionary)")
+write_csv(traj_tab, file.path(out_dir, "trajectory_by_label.csv"))
+```
+
+## 4.5 Vowel space (Figure 4) and the annotated tokens (Figure 5)
+
+```{r fig4, fig.width=11, fig.height=9}
+lab_n <- tracks_z_cap %>% count(cond, label)
+big   <- lab_n %>% filter(n >= cfg$min_n_ellipse)
+d4 <- tracks_z_cap %>% inner_join(big %>% select(cond, label), by = c("cond", "label")) %>%
+  mutate(is_diph = label %in% DIPH, cond = factor(cond, levels = cfg$conds))
+cent4 <- d4 %>% group_by(cond, label, is_diph) %>% summarise(z1 = mean(z1), z2 = mean(z2), .groups = "drop")
+bg <- tracks_z_cap %>% mutate(cond = factor(cond, levels = cfg$conds)) %>% group_by(cond) %>%
+  group_modify(~ dplyr::slice_sample(.x, n = min(2500, nrow(.x)))) %>% ungroup()
+panel_lab <- tracks_z_cap %>% count(cond) %>%
+  mutate(txt = paste0(cond, " dictionary (n = ", format(n, big.mark = ","), ")"))
+fig4 <- ggplot() +
+  geom_point(data = bg, aes(z2, z1), colour = "grey75", alpha = .25, size = .6) +
+  stat_ellipse(data = d4, aes(z2, z1, group = label, colour = is_diph), type = "norm", level = pchisq(1, 2), linewidth = .7) +
+  geom_text(data = cent4, aes(z2, z1, label = label, colour = is_diph), fontface = "bold", size = 4) +
+  scale_colour_manual(values = c(`FALSE` = "#1F5FA8", `TRUE` = "#C0392B"), guide = "none") +
+  scale_x_reverse() + scale_y_reverse() + coord_cartesian(xlim = c(2.6, -2.6), ylim = c(3, -2.4)) +
+  facet_wrap(~ cond, ncol = 2, labeller = as_labeller(setNames(panel_lab$txt, panel_lab$cond))) +
+  labs(x = "Normalised F2", y = "Normalised F1") + theme_bw(base_size = 11)
+print(fig4); ggsave(file.path(out_dir, "figure4_vowel_space_by_dictionary.png"), fig4, width = 11, height = 9, dpi = 200)
+
+# the same figure with the NigE categories drawn (dashed grey) in the other three panels
+nige_rep <- map_dfr(cfg$conds[-1], ~ d4 %>% filter(cond == "NigE") %>% mutate(cond = factor(.x, levels = cfg$conds)))
+cent_rep <- map_dfr(cfg$conds[-1], ~ cent4 %>% filter(cond == "NigE") %>% mutate(cond = factor(.x, levels = cfg$conds)))
+fig4b <- ggplot() +
+  geom_point(data = bg %>% filter(cond != "NigE"), aes(z2, z1), colour = "grey75", alpha = .25, size = .6) +
+  stat_ellipse(data = nige_rep, aes(z2, z1, group = label), colour = "grey50", linetype = "dashed", type = "norm", level = pchisq(1, 2), linewidth = .5) +
+  geom_text(data = cent_rep, aes(z2, z1, label = label), colour = "grey50", size = 3) +
+  stat_ellipse(data = d4 %>% filter(cond != "NigE"), aes(z2, z1, group = label, colour = is_diph), type = "norm", level = pchisq(1, 2), linewidth = .7) +
+  geom_text(data = cent4 %>% filter(cond != "NigE"), aes(z2, z1, label = label, colour = is_diph), fontface = "bold", size = 4) +
+  scale_colour_manual(values = c(`FALSE` = "#1F5FA8", `TRUE` = "#C0392B"), guide = "none") +
+  scale_x_reverse() + scale_y_reverse() +
+  facet_wrap(~ cond, ncol = 3) + labs(x = "Normalised F2", y = "Normalised F1") + theme_bw(base_size = 11)
+ggsave(file.path(out_dir, "figure4b_overlay_NigE.png"), fig4b, width = 13, height = 5, dpi = 200)
+```
+
+```{r fig5, fig.width=12, fig.height=7}
+sch_lab <- schemes %>% group_by(scheme, label) %>% filter(n() >= 3) %>%
+  summarise(z1 = mean(z1), z2 = mean(z2), .groups = "drop") %>%
+  mutate(scheme = factor(scheme, levels = c("Annotator", cfg$conds)))
+fig5 <- ggplot() +
+  geom_point(data = schemes %>% mutate(scheme = factor(scheme, levels = c("Annotator", cfg$conds))), aes(z2, z1), colour = "grey75", size = 1) +
+  geom_text(data = sch_lab, aes(z2, z1, label = label), colour = "#0072B2", fontface = "bold", size = 4) +
+  scale_x_reverse() + scale_y_reverse() + facet_wrap(~ scheme, ncol = 3) +   # common axes in every panel
+  labs(x = "Normalised F2", y = "Normalised F1") + theme_bw(base_size = 11)
+print(fig5); ggsave(file.path(out_dir, "figure5_labellings_of_annotated_tokens.png"), fig5, width = 12, height = 7, dpi = 200)
+```
+
+## 4.6 Alignment success and agreement between dictionaries (whole corpus)
+
+Every recording of the corpus is considered together. Alignment success asks whether a dictionary returns a TextGrid for a recording at all. Agreement between dictionaries needs no annotation: for every vowel interval of the NigE alignment, the vowel interval of another dictionary that overlaps it by at least half of the shorter one is its counterpart. It describes how far the dictionaries agree with each other, not which one is right. The two transcription rounds appear only in the tables that check that they behave alike.
+
+```{r corpus-success}
+rec_info <- rec_seconds %>%
+  mutate(series = str_extract(rec, "^[A-Za-z]+"),
+         words = map2_int(rec, part, function(r, pt) {
+           f <- file.path(part_root(pt), "NigE", paste0(r, ".txt"))
+           if (!file.exists(f)) return(NA_integer_)
+           str_count(paste(readLines(f, warn = FALSE, encoding = "UTF-8"), collapse = " "), "\\S+")
+         }),
+         words_per_min = words / (seconds / 60))
+for (cd in cfg$conds) rec_info[[paste0("aligned_", cd)]] <- rec_info$rec %in% c(rec_sets_study[[cd]], rec_sets_ext[[cd]])
+rec_info <- rec_info %>% mutate(aligned_all4 = rec %in% shared)
+success <- map_dfr(cfg$conds, function(cd) {
+  a <- rec_info[[paste0("aligned_", cd)]]
+  tibble(dictionary = cd, aligned = sum(a), of = length(a), hours_aligned = sum(rec_info$seconds[a]) / 3600,
+         median_minutes_failed = median(rec_info$seconds[!a]) / 60, median_minutes_aligned = median(rec_info$seconds[a]) / 60,
+         median_words_per_min_failed = median(rec_info$words_per_min[!a], na.rm = TRUE),
+         median_words_per_min_aligned = median(rec_info$words_per_min[a], na.rm = TRUE))
+})
+kable(success, digits = 1, caption = "Alignment success by dictionary, whole corpus")
+by_series <- rec_info %>% group_by(series) %>%
+  summarise(recordings = n(), minutes = round(sum(seconds) / 60), NigE = sum(aligned_NigE), Indian = sum(aligned_Indian),
+            UK = sum(aligned_UK), US = sum(aligned_US), all_four = sum(aligned_all4), .groups = "drop") %>% arrange(desc(minutes))
+kable(by_series, caption = "Recordings aligned, by recording series")
+by_part <- rec_info %>% group_by(part) %>%
+  summarise(recordings = n(), hours = sum(seconds) / 3600, NigE = sum(aligned_NigE), Indian = sum(aligned_Indian), UK = sum(aligned_UK),
+            US = sum(aligned_US), all_four = sum(aligned_all4), hours_all_four = sum(seconds[aligned_all4]) / 3600, .groups = "drop")
+kable(by_part, digits = 2, caption = "Recordings aligned, by transcription round")
+write_csv(rec_info, file.path(out_dir, "corpus_recordings.csv"))
+write_csv(success, file.path(out_dir, "alignment_success.csv"))
+add_check("Recordings in the corpus", nrow(rec_info), 131, 0)
+for (cd in cfg$conds) add_check(paste("Recordings aligned, whole corpus,", cd), sum(rec_info[[paste0("aligned_", cd)]]), c(NigE = 96, Indian = 92, UK = 92, US = 90)[[cd]], 0)
+```
+
+```{r corpus-agreement}
+agree_pairs <- function(recs) {
+  map_dfr(recs, function(rec) {
+    a <- read_phones("NigE", rec); a <- a[is_vowel(a$label) & a$end > a$start, ]
+    map_dfr(cfg$conds[-1], function(cd) {
+      b <- read_phones(cd, rec); b <- b[is_vowel(b$label) & b$end > b$start, ]
+      j <- match_best(a$start, a$end, b$start, b$end)
+      tibble(rec = rec, part = unname(part_of[rec]), series = str_extract(rec, "^[A-Za-z]+"), cond = cd, nige = a$label,
+             other = as.character(ifelse(is.na(j), NA_character_, b$label[j])))
+    })
+  })
+}
+agree_all <- agree_pairs(shared)
+agree_sum <- function(d) {
+  f <- !is.na(d$other)
+  tibble(nige_vowels = nrow(d), found = 100 * mean(f),
+         same_symbol = 100 * mean(d$other[f] == d$nige[f]),
+         same_no_length = 100 * mean(sub("ː+$", "", d$other[f]) == sub("ː+$", "", d$nige[f])),
+         same_category = 100 * mean(category(d$other[f]) == category(d$nige[f])),
+         mono_to_diph = 100 * mean(d$other[f] %in% DIPH & !(d$nige[f] %in% DIPH)))
+}
+agree_tab <- agree_all %>% group_by(cond) %>% group_modify(~ agree_sum(.x)) %>% ungroup() %>%
+  mutate(cond = factor(cond, levels = cfg$conds[-1])) %>% arrange(cond)
+kable(agree_tab, digits = 1, caption = "NigE alignment versus each other dictionary, whole corpus: share of NigE vowels found, and agreement among those found")
+write_csv(agree_tab, file.path(out_dir, "agreement_between_dictionaries.csv"))
+agree_part <- agree_all %>% group_by(part, cond) %>% group_modify(~ agree_sum(.x)) %>% ungroup()
+kable(agree_part, digits = 1, caption = "The same, by transcription round (the two rounds should behave alike)")
+agree_series <- agree_all %>% group_by(series, cond) %>% group_modify(~ agree_sum(.x)) %>% ungroup() %>% filter(nige_vowels >= 300)
+kable(agree_series, digits = 1, caption = "The same, by recording series")
+# per recording, so that long recordings do not decide the result: the median across recordings
+agree_rec <- agree_all %>% group_by(cond, rec) %>% group_modify(~ agree_sum(.x)) %>% ungroup() %>% group_by(cond) %>%
+  summarise(recordings = n(), median_found = median(found), median_same_category = median(same_category), .groups = "drop")
+kable(agree_rec, digits = 1, caption = "Median across recordings (each recording counts once)")
+top_labels <- agree_all %>% count(nige, sort = TRUE) %>% filter(n >= 300) %>% pull(nige)
+agree_label <- agree_all %>% filter(nige %in% top_labels) %>% mutate(vowel = nige) %>% group_by(vowel, cond) %>% group_modify(~ agree_sum(.x)) %>% ungroup() %>%
+  select(vowel, cond, nige_vowels, found, same_category) %>% pivot_wider(names_from = cond, values_from = c(found, same_category))
+kable(agree_label, digits = 0, caption = "By NigE vowel: share found and share in the same category, per dictionary")
+write_csv(agree_label, file.path(out_dir, "agreement_between_dictionaries_by_vowel.csv"))
+```
+
+```{r sensitivity-low-snr}
+# the two recordings at or below 3 dB under at least one dictionary (btal_15_4, unsp_45)
+low_recs <- c("btal_15_4", "unsp_45")
+agree_low <- agree_all %>% filter(!rec %in% low_recs) %>% group_by(cond) %>% group_modify(~ agree_sum(.x)) %>% ungroup() %>%
+  mutate(cond = factor(cond, levels = cfg$conds[-1])) %>% arrange(cond)
+kable(agree_low, digits = 1, caption = "Agreement with NigE without the two recordings at or below 3 dB")
+stab_low <- stab %>% filter(!rec %in% low_recs) %>% group_by(cond) %>%
+  summarise(matched = n(), median_abs_dF1 = median(d1), p90_abs_dF1 = quantile(d1, .9), median_abs_dF2 = median(d2), p90_abs_dF2 = quantile(d2, .9), .groups = "drop")
+kable(stab_low, digits = 1, caption = "Midpoint formant differences without the two recordings at or below 3 dB")
+```
+
+# 5. Reliability (Section 2.3)
+
+This section runs when the files exist: the second annotator's file, the glide-check file and the first annotator's repeat. Each is compared with the first annotator's marks for the same tokens (`id`).
+
+```{r reliability}
+locate <- function(f) {
+  cand <- c(file.path(cfg$ann_dir, f), p("blind_sample_v2", f))
+  cand <- cand[file.exists(cand)]
+  if (length(cand)) cand[1] else NA_character_
+}
+read_other <- function(path) {
+  read_tsv(path, col_types = cols(.default = col_character()), progress = FALSE) %>%
+    mutate(across(everything(), ~ ifelse(str_trim(.x) %in% c("?", "--undefined--"), NA_character_, .x))) %>%
+    transmute(id, lab2 = canon_label(str_trim(label)), on2 = as.numeric(onset_s), off2 = as.numeric(offset_s)) %>%
+    filter(!is.na(lab2), lab2 != "UNSURE", !is.na(on2), !is.na(off2))
+}
+compare_annot <- function(fname, set) {
+  path <- locate(fname)
+  if (is.na(path)) { message("Not found yet: ", fname); return(NULL) }
+  d <- inner_join(read_other(path), toks %>% select(id, lab, on, off), by = "id")
+  tibble(set = set, n = nrow(d),
+         same_label_pct       = 100 * mean(d$lab == d$lab2),
+         same_ignoring_length = 100 * mean(sub("ː+$", "", d$lab) == sub("ː+$", "", d$lab2)),
+         same_category_pct    = 100 * mean(category(d$lab) == category(d$lab2)),
+         same_glide_status    = 100 * mean((d$lab %in% DIPH) == (d$lab2 %in% DIPH)),
+         median_abs_onset_ms  = 1000 * median(abs(d$on - d$on2)), median_abs_offset_ms = 1000 * median(abs(d$off - d$off2)),
+         within5_pct  = 100 * mean(abs(d$on - d$on2) <= .005 & abs(d$off - d$off2) <= .005),
+         within10_pct = 100 * mean(abs(d$on - d$on2) <= .010 & abs(d$off - d$off2) <= .010),
+         within20_pct = 100 * mean(abs(d$on - d$on2) <= .020 & abs(d$off - d$off2) <= .020))
+}
+rel <- bind_rows(compare_annot("reliability_second_annotator_annotated.tsv", "Second annotator"),
+                 compare_annot("reliability_glide_check_annotated.tsv", "Second annotator, glide-check rows"),
+                 compare_annot("reliability_self_repeat_annotated.tsv", "First annotator, repeat"))
+if (nrow(rel) > 0) { print(kable(rel, digits = 1, caption = "Agreement with the first annotator's marks")); write_csv(rel, file.path(out_dir, "reliability.csv")) } else
+  cat("No reliability files found yet. Save the annotated .tsv files in", cfg$ann_dir, "and knit again.\n")
+```
+
+# 6. Verification
+
+## 6.1 Headline numbers against the manuscript
+
+Every row is a number printed in the manuscript. `ok` allows for rounding (and, for bootstrap quantities, for resampling noise). The formant numbers after Table 7 depend on the corrected token filter (`min_span`), so they are not listed here: compare them with the values you report once the document has run.
+
+```{r verify}
+chk <- bind_rows(checks)
+print(kable(chk %>% mutate(result = ifelse(ok, "PASS", "FAIL")) %>% select(check, got, expected, result),
+            caption = "Reproduction of the manuscript's numbers"))
+cat(sum(chk$ok), "of", nrow(chk), "checks pass.\n")
+if (any(!chk$ok)) cat("Failing checks:\n", paste0(" - ", chk$check[!chk$ok], collapse = "\n"), "\n")
+```
+
+## 6.2 Token-by-token comparison with the Python scores
+
+The scores in the manuscript were first computed in Python (`score_blind_sample.py`, `MATCH=overlap`). If that output is available, this chunk compares it with the scores computed above, row by row.
+
+```{r python-check}
+py_path <- c(p("blind_sample_v2", "results_overlap", "token_level_scores.csv"), p("blind_sample_v2", "results", "token_level_scores.csv"))
+py_path <- py_path[file.exists(py_path)][1]
+if (!is.na(py_path) && cfg$match_rule == "overlap") {
+  py <- read_csv(py_path, col_types = cols(.default = col_character())) %>%
+    transmute(id, cond, model_py = model, detected_py = as.integer(detected), strict_py = as.integer(strict),
+              nolen_py = as.integer(nolen), cat_py = as.integer(cat), mono2diph_py = as.integer(mono2diph),
+              on_err_py = suppressWarnings(as.numeric(on_err)), off_err_py = suppressWarnings(as.numeric(off_err)))
+  cmp <- inner_join(scored, py, by = c("id", "cond"))
+  cmp_tab <- tibble(rows_compared = nrow(cmp), rows_in_R = nrow(scored), rows_in_python = nrow(py),
+                    detected_equal_pct = 100 * mean(cmp$detected == cmp$detected_py),
+                    strict_equal_pct   = 100 * mean(cmp$strict == cmp$strict_py),
+                    nolen_equal_pct    = 100 * mean(cmp$nolen == cmp$nolen_py),
+                    category_equal_pct = 100 * mean(cmp$cat == cmp$cat_py),
+                    model_label_equal_pct = 100 * mean(cmp$model == cmp$model_py),
+                    max_abs_onset_diff_ms = max(abs(cmp$on_err - cmp$on_err_py), na.rm = TRUE),
+                    max_abs_offset_diff_ms = max(abs(cmp$off_err - cmp$off_err_py), na.rm = TRUE))
+  print(kable(cmp_tab, digits = 3, caption = "R scores compared with the Python scores"))
+  print(cmp %>% filter(detected != detected_py | strict != strict_py | cat != cat_py | model != model_py) %>%
+          select(id, cond, file, lab, model, model_py, detected, detected_py) %>% head(15) %>% as.data.frame())
+} else cat("No Python token_level_scores.csv found, or match_rule is not 'overlap': comparison skipped.\n")
+```
+
+## 6.3 Session
+
+```{r session}
+sessionInfo()
+```

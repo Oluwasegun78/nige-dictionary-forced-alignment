@@ -1,0 +1,10 @@
+item,recordings,hours
+Audio files in the source folder,138,5.84
+"   left out by design (dem_09, dem_11, dem_14)",3,0.82
+"   transcribed, but outside the corpus",4,0.19
+Recordings in the corpus,131,4.825135932777777
+   transcribed in round 1,100,0.8272470438888887
+   transcribed in round 2,31,3.9978888888888884
+Recordings aligned by all four dictionaries (analysed),88,3.7646784858333335
+   round 1,69,0.5404562636111111
+   round 2,19,3.2242222222222225

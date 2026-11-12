@@ -1,0 +1,9 @@
+part,cond,recordings,vowel_intervals,ge50ms,n_tracked
+round1,NigE,69,6819,5119,5118
+round1,Indian,69,6661,4962,4962
+round1,UK,69,6820,5128,5128
+round1,US,69,6813,5028,5028
+round2,NigE,19,34263,24220,24219
+round2,Indian,19,31906,22568,22566
+round2,UK,19,32305,22902,22900
+round2,US,19,32143,22242,22240

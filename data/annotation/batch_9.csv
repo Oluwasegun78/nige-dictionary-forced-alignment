@@ -1,0 +1,8 @@
+id,file,word,vowel_in_word,window_start,window_end,onset_s,offset_s,label,notes
+0041,btal_10_14,righteous,2,35.17,36.07,,,,
+0046,btal_10_21,bible,2,15.42,16.32,,,,
+0073,btal_13_3,mercury,3,25.37,26.4,,,,
+0107,btal_15_6,title,2,24.44,25.45,,,,
+0133,btal_01_20,sugar,2,3.96,4.89,,,,
+0157,btal_01_4,powerful,3,1.15,2.04,,,,
+0172,btal_01_14,higher,2,5.69,6.77,,,,
